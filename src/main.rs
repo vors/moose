@@ -1,3 +1,5 @@
+/// This file is heavily based on https://github.com/prefix-dev/rip/blob/b7ea9397d969beae682e1c59b5a899d24876c4ac/crates/rip_bin/src/main.rs
+/// Which is licensed under the BSD-3-Clause license.
 use std::collections::HashMap;
 use std::io::Write;
 use std::str::FromStr;
