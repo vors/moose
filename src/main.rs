@@ -1,6 +1,8 @@
 /// This file is heavily based on https://github.com/prefix-dev/rip/blob/b7ea9397d969beae682e1c59b5a899d24876c4ac/crates/rip_bin/src/main.rs
 /// Which is licensed under the BSD-3-Clause license.
+use indoc::formatdoc;
 use std::collections::HashMap;
+use std::fs::File;
 use std::io::Write;
 use std::str::FromStr;
 
@@ -12,7 +14,9 @@ use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, Env
 use url::Url;
 
 use rattler_installs_packages::tags::WheelTags;
-use rattler_installs_packages::{normalize_index_url, resolve, Pep508EnvMakers, Requirement};
+use rattler_installs_packages::{
+    normalize_index_url, resolve, Pep508EnvMakers, PinnedPackage, Requirement,
+};
 
 use indicatif::{MultiProgress, ProgressDrawTarget};
 use std::io;
@@ -77,6 +81,78 @@ struct Args {
 
     #[clap(short)]
     verbose: bool,
+
+    #[clap(default_value = "BUCK", long)]
+    output_file: String,
+}
+
+fn gen_buck_file_content(packages: &[PinnedPackage]) -> miette::Result<String> {
+    // Here is what we want to generate roughly speaking
+    //
+    // remote_file(
+    //     name = "requests-download",
+    //     url = "https://files.pythonhosted.org/packages/51/bd/23c926cd341ea6b7dd0b2a00aba99ae0f828be89d72b2190f27c11d4b7fb/requests-2.22.0-py2.py3-none-any.whl",
+    //     sha1 = "e1fc28120002395fe1f2da9aacea4e15a449d9ee",
+    //     out = "requests-2.22.0-py2.py3-none-any.whl",
+    // )
+
+    // remote_file(
+    //     name = "chardet-download",
+    //     url = "https://files.pythonhosted.org/packages/38/6f/f5fbc992a329ee4e0f288c1fe0e2ad9485ed064cac731ed2fe47dcc38cbf/chardet-5.2.0-py3-none-any.whl",
+    //     sha1 = "2facc0387556aa8a2956ef682d49fc3eae56d30a",
+    //     out = "chardet-5.2.0-py3-none-any.whl",
+    // )
+
+    // prebuilt_python_library(
+    //     name = "requests",
+    //     binary_src = ":requests-download",
+    //     # deps = [":chardet"],
+    //     visibility = ["PUBLIC"],
+    // )
+
+    // prebuilt_python_library(
+    //     name = "chardet",
+    //     binary_src = ":chardet-download",
+    // )
+    Ok(packages
+        .iter()
+        .map(|package| {
+            let mut artifacts = package.artifacts.clone();
+            artifacts.sort_by(|a, b| {
+                // The idea of this sort is to prefer built wheels over the source distributions.
+                // However there are many wheels with just the source distribution (i.e. no native extensions).
+                if a.filename.as_wheel().is_none() {
+                    return std::cmp::Ordering::Greater;
+                }
+                if b.filename.as_wheel().is_none() {
+                    return std::cmp::Ordering::Less;
+                }
+                return std::cmp::Ordering::Equal;
+            });
+            let url = artifacts.first().unwrap().url.as_str();
+            let (url_without_sha, sha) = url.split_once("#sha256=").unwrap();
+            let filename = url_without_sha.split("/").last().unwrap();
+            return formatdoc!(
+                r#"
+remote_file(
+    name = "{name}-download",
+    url = "{url}",
+    sha256 = "{sha}",
+    out = "{out}",
+)
+
+prebuilt_python_library(
+    name = "{name}",
+    binary_src = ":{name}-download",
+)
+"#,
+                name = package.name,
+                url = url_without_sha,
+                sha = sha,
+                out = filename,
+            );
+        })
+        .join("\n"))
 }
 
 async fn actual_main() -> miette::Result<()> {
@@ -149,6 +225,11 @@ async fn actual_main() -> miette::Result<()> {
     for spec in args.specs.iter() {
         println!("- {}", spec);
     }
+
+    // Generate the buck file
+    let buck_file_content = gen_buck_file_content(blueprint.as_slice())?;
+    let mut output = File::create(args.output_file).into_diagnostic()?;
+    writeln!(output, "{}", buck_file_content).into_diagnostic()?;
 
     println!();
     let mut tabbed_stdout = tabwriter::TabWriter::new(std::io::stdout());
