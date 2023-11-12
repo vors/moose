@@ -1,0 +1,3 @@
+[submodule "third_party/rip"]
+	path = third_party/rip
+	url = https://github.com/prefix-dev/rip
