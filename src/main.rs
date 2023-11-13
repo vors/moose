@@ -1,7 +1,8 @@
 /// This file is heavily based on https://github.com/prefix-dev/rip/blob/b7ea9397d969beae682e1c59b5a899d24876c4ac/crates/rip_bin/src/main.rs
 /// Which is licensed under the BSD-3-Clause license.
+use futures::future::join_all;
 use indoc::formatdoc;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::Write;
 use std::str::FromStr;
@@ -15,7 +16,8 @@ use url::Url;
 
 use rattler_installs_packages::tags::WheelTags;
 use rattler_installs_packages::{
-    normalize_index_url, resolve, Pep508EnvMakers, PinnedPackage, Requirement,
+    normalize_index_url, resolve, PackageDb, Pep508EnvMakers, PinnedPackage, Requirement, Version,
+    Wheel,
 };
 
 use indicatif::{MultiProgress, ProgressDrawTarget};
@@ -86,7 +88,14 @@ struct Args {
     output_file: String,
 }
 
-fn gen_buck_file_content(packages: &[PinnedPackage]) -> miette::Result<String> {
+fn normalize_name(name: &str) -> String {
+    name.replace("-", "_").to_lowercase()
+}
+
+async fn gen_buck_file_content(
+    packages: &[PinnedPackage<'_>],
+    package_db: &PackageDb,
+) -> miette::Result<String> {
     // Here is what we want to generate roughly speaking
     //
     // remote_file(
@@ -114,26 +123,49 @@ fn gen_buck_file_content(packages: &[PinnedPackage]) -> miette::Result<String> {
     //     name = "chardet",
     //     binary_src = ":chardet-download",
     // )
-    Ok(packages
-        .iter()
-        .map(|package| {
-            let mut artifacts = package.artifacts.clone();
-            artifacts.sort_by(|a, b| {
-                // The idea of this sort is to prefer built wheels over the source distributions.
-                // However there are many wheels with just the source distribution (i.e. no native extensions).
-                if a.filename.as_wheel().is_none() {
-                    return std::cmp::Ordering::Greater;
-                }
-                if b.filename.as_wheel().is_none() {
-                    return std::cmp::Ordering::Less;
-                }
-                return std::cmp::Ordering::Equal;
-            });
-            let url = artifacts.first().unwrap().url.as_str();
-            let (url_without_sha, sha) = url.split_once("#sha256=").unwrap();
-            let filename = url_without_sha.split("/").last().unwrap();
-            return formatdoc!(
-                r#"
+
+    Ok(join_all(packages.iter().map(|package| async {
+        let mut artifacts = package.artifacts.clone();
+        artifacts.sort_by(|a, b| {
+            // The idea of this sort is to prefer built wheels over the source distributions.
+            // However there are many wheels with just the source distribution (i.e. no native extensions).
+            if a.filename.as_wheel().is_none() {
+                return std::cmp::Ordering::Greater;
+            }
+            if b.filename.as_wheel().is_none() {
+                return std::cmp::Ordering::Less;
+            }
+            return std::cmp::Ordering::Equal;
+        });
+        let url = artifacts.first().unwrap().url.as_str();
+        let (url_without_sha, sha) = url.split_once("#sha256=").unwrap();
+        let filename = url_without_sha.split("/").last().unwrap();
+
+        // Get deps from metadata
+        let (_, metadata) = package_db
+            .get_metadata::<Wheel, _>(artifacts.as_slice())
+            .await
+            .unwrap()
+            .expect("metadata not found");
+        let package_extras =
+            HashSet::from_iter(package.extras.iter().map(|e| e.as_str().to_string()));
+        // TODO: hardcoded python version? can we get rid of it?
+        let python_version = Version::from_str("3.7").unwrap();
+        let req_names: Vec<String> = metadata
+            .requires_dist
+            .iter()
+            // TODO: I'm not sure this filter does the right thing -- we shell see on the the real world examples
+            .filter(|req| {
+                req.evaluate_extras_and_python_version(
+                    package_extras.clone(),
+                    vec![python_version.clone()],
+                )
+            })
+            .map(|req| format!("\":{}\"", normalize_name(req.name.as_str())))
+            .collect();
+
+        return formatdoc!(
+            r#"
 remote_file(
     name = "{name}-download",
     url = "{url}",
@@ -144,15 +176,19 @@ remote_file(
 prebuilt_python_library(
     name = "{name}",
     binary_src = ":{name}-download",
+    deps = [{deps}],
+    visibility = ["PUBLIC"],
 )
 "#,
-                name = package.name,
-                url = url_without_sha,
-                sha = sha,
-                out = filename,
-            );
-        })
-        .join("\n"))
+            name = normalize_name(package.name.as_str()),
+            url = url_without_sha,
+            sha = sha,
+            out = filename,
+            deps = req_names.join(", "),
+        );
+    }))
+    .await
+    .join("\n"))
 }
 
 async fn actual_main() -> miette::Result<()> {
@@ -226,8 +262,8 @@ async fn actual_main() -> miette::Result<()> {
         println!("- {}", spec);
     }
 
-    // Generate the buck file
-    let buck_file_content = gen_buck_file_content(blueprint.as_slice())?;
+    // Generate the BUCK file
+    let buck_file_content = gen_buck_file_content(blueprint.as_slice(), &package_db).await?;
     let mut output = File::create(args.output_file).into_diagnostic()?;
     writeln!(output, "{}", buck_file_content).into_diagnostic()?;
 
@@ -271,7 +307,7 @@ async fn main() {
 
 /// Constructs a default [`EnvFilter`] that is used when the user did not specify a custom RUST_LOG.
 pub fn get_default_env_filter(verbose: bool) -> EnvFilter {
-    let mut result = EnvFilter::new("rip=info")
+    let mut result = EnvFilter::new("moose=info")
         .add_directive(Directive::from_str("rattler_installs_packages=info").unwrap());
 
     if verbose {

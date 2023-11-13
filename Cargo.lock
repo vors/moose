@@ -1327,6 +1327,7 @@ dependencies = [
  "clap",
  "console",
  "dirs",
+ "futures",
  "indexmap 2.1.0",
  "indicatif",
  "indoc",
