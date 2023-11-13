@@ -16,8 +16,7 @@ use url::Url;
 
 use rattler_installs_packages::tags::WheelTags;
 use rattler_installs_packages::{
-    normalize_index_url, resolve, PackageDb, Pep508EnvMakers, PinnedPackage, Requirement, Version,
-    Wheel,
+    normalize_index_url, resolve, PackageDb, Pep508EnvMakers, PinnedPackage, Requirement, Wheel,
 };
 
 use indicatif::{MultiProgress, ProgressDrawTarget};
@@ -149,8 +148,6 @@ async fn gen_buck_file_content(
             .expect("metadata not found");
         let package_extras =
             HashSet::from_iter(package.extras.iter().map(|e| e.as_str().to_string()));
-        // TODO: hardcoded python version? can we get rid of it?
-        let python_version = Version::from_str("3.7").unwrap();
         let req_names: Vec<String> = metadata
             .requires_dist
             .iter()
@@ -158,7 +155,8 @@ async fn gen_buck_file_content(
             .filter(|req| {
                 req.evaluate_extras_and_python_version(
                     package_extras.clone(),
-                    vec![python_version.clone()],
+                    // TODO: we pass empty python_versions... what we actually want here?
+                    vec![],
                 )
             })
             .map(|req| format!("\":{}\"", normalize_name(req.name.as_str())))
