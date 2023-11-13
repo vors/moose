@@ -9,7 +9,7 @@ This project builds on top of https://github.com/prefix-dev/rip
 ## Limitations
 
 Currently only works against the current python
-(it uses default `python3`` executable to determine, version, os and abi).
+(it uses default `python3` executable to determine, version, os and abi).
 This could be fixed in future by generating different `select` and `alias` statements inside the BUCK file,
 so the generated file is cross-platform.
 
